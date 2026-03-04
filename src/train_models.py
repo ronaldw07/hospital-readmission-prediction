@@ -63,7 +63,7 @@ def apply_smote(
 
     Author: Ronald Wen
     """
-    smote = SMOTE(random_state=random_state, n_jobs=-1)
+    smote = SMOTE(random_state=random_state)
     X_res, y_res = smote.fit_resample(X_train, y_train)
     X_res = pd.DataFrame(X_res, columns=X_train.columns)
     y_res = pd.Series(y_res, name=y_train.name)
@@ -311,12 +311,12 @@ def run_training(
         for name, estimator in cv_estimators.items():
             cross_validate_model(estimator, X_all, y_all, model_name=name)
 
-    print("\n--- Final Model Training (SMOTE-resampled data) ---")
+    print("\n--- Final Model Training (original training data) ---")
     models = {
-        'logistic_regression': train_logistic_regression(X_train_smote, y_train_smote),
-        'random_forest': train_random_forest(X_train_smote, y_train_smote),
-        'xgboost': train_xgboost(X_train_smote, y_train_smote),
-        'lightgbm': train_lightgbm(X_train_smote, y_train_smote),
+        'logistic_regression': train_logistic_regression(X_train, y_train),
+        'random_forest': train_random_forest(X_train, y_train),
+        'xgboost': train_xgboost(X_train, y_train),
+        'lightgbm': train_lightgbm(X_train, y_train),
     }
 
     for name, model in models.items():

@@ -96,9 +96,10 @@ jupyter notebook notebooks/readmission_analysis.ipynb
 |---------------------|---------|--------|--------------|----------------------|
 | Logistic Regression | 0.626   | 0.519  | 0.205        | 0.215                |
 | Random Forest       | 0.640   | 0.453  | 0.219        | 0.221                |
-| XGBoost             | 0.636   | 0.434  | 0.219        | 0.225                |
+| XGBoost (tuned)     | 0.650   | 0.539  | 0.223        | 0.241                |
+| LightGBM            | 0.626   | 0.389  | 0.211        | 0.215                |
 
-Threshold tuning via precision-recall curve analysis improved F1 across all models. The default 0.5 threshold is suboptimal for imbalanced clinical data (~9% positive rate); tuned thresholds better balance precision and recall for real-world triage.
+XGBoost was tuned via RandomizedSearchCV (30 iterations, 3-fold CV) and achieved the best AUC-ROC of 0.650. Threshold tuning via precision-recall curve analysis further improved F1 to 0.241. Training data was resampled using SMOTE to address the 9% positive class rate.
 
 ### 5-Fold Cross-Validation (Stratified)
 
@@ -107,6 +108,7 @@ Threshold tuning via precision-recall curve analysis improved F1 across all mode
 | Logistic Regression | 0.622 ± 0.003  | 0.204 ± 0.001  |
 | Random Forest       | 0.643 ± 0.003  | 0.220 ± 0.003  |
 | XGBoost             | 0.636 ± 0.006  | 0.219 ± 0.004  |
+| LightGBM            | 0.628 ± 0.004  | 0.218 ± 0.003  |
 
 Low variance across folds confirms stable generalisation on unseen patient data.
 
