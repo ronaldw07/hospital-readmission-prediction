@@ -57,6 +57,7 @@ def load_models(models_dir: Path) -> dict[str, object]:
         'Random Forest': 'random_forest.pkl',
         'XGBoost': 'xgboost.pkl',
         'LightGBM': 'lightgbm.pkl',
+        'Neural Network (MLP)': 'neural_network.pkl',
     }
 
     models = {}
@@ -159,7 +160,7 @@ def plot_roc_curves(
     """
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    colours = ['#2196F3', '#4CAF50', '#FF5722', '#9C27B0']
+    colours = ['#2196F3', '#4CAF50', '#FF5722', '#9C27B0', '#F44336']
     for (name, model), colour in zip(models.items(), colours):
         y_prob = model.predict_proba(X_test)[:, 1]
         fpr, tpr, _ = roc_curve(y_test, y_prob)
@@ -194,7 +195,7 @@ def plot_precision_recall_curves(
     """
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    colours = ['#2196F3', '#4CAF50', '#FF5722', '#9C27B0']
+    colours = ['#2196F3', '#4CAF50', '#FF5722', '#9C27B0', '#F44336']
     for (name, model), colour in zip(models.items(), colours):
         y_prob = model.predict_proba(X_test)[:, 1]
         precisions, recalls, _ = precision_recall_curve(y_test, y_prob)

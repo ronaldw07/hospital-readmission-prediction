@@ -1,8 +1,8 @@
 """
 Model training module for hospital readmission prediction.
 
-Trains four classifiers — Logistic Regression, Random Forest, XGBoost,
-and LightGBM — on SMOTE-resampled training data and saves each model to disk.
+Trains five classifiers — Logistic Regression, Random Forest, XGBoost,
+LightGBM, and a PyTorch MLP — on training data and saves each model to disk.
 XGBoost is tuned via RandomizedSearchCV to maximise AUC-ROC.
 
 Author: Ronald Wen
@@ -22,6 +22,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, cross_validate
 from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBClassifier
+
+from mlp_model import MLPClassifier
 
 
 def load_splits(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
@@ -219,6 +221,36 @@ def train_lightgbm(
     return model
 
 
+def train_mlp(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    random_state: int = 42,
+) -> MLPClassifier:
+    """Fit a two-hidden-layer PyTorch MLP classifier.
+
+    Uses BCEWithLogitsLoss with pos_weight to handle class imbalance.
+    A StandardScaler is fitted inside the wrapper so the model is
+    self-contained for serialisation.
+
+    Author: Ronald Wen
+    """
+    spw = _class_weight_ratio(y_train)
+
+    model = MLPClassifier(
+        hidden_dims=[128, 64],
+        dropout=0.3,
+        epochs=50,
+        lr=1e-3,
+        batch_size=512,
+        pos_weight=spw,
+        random_state=random_state,
+    )
+    print("Training Neural Network (MLP, 50 epochs)...")
+    model.fit(X_train.values, y_train.values)
+    print("  Done.")
+    return model
+
+
 def cross_validate_model(
     model: object,
     X: pd.DataFrame,
@@ -302,6 +334,7 @@ def run_training(
         'random_forest': RandomForestClassifier(n_estimators=300, max_depth=12, min_samples_leaf=20, max_features='sqrt', class_weight='balanced', random_state=42, n_jobs=-1),
         'xgboost': XGBClassifier(n_estimators=400, learning_rate=0.05, max_depth=6, subsample=0.8, colsample_bytree=0.8, scale_pos_weight=_class_weight_ratio(y_train), eval_metric='logloss', random_state=42, n_jobs=-1),
         'lightgbm': LGBMClassifier(n_estimators=500, learning_rate=0.05, max_depth=7, num_leaves=63, subsample=0.8, colsample_bytree=0.8, scale_pos_weight=_class_weight_ratio(y_train), random_state=42, n_jobs=-1, verbose=-1),
+        'neural_network': MLPClassifier(hidden_dims=[128, 64], dropout=0.3, epochs=50, lr=1e-3, batch_size=512, pos_weight=_class_weight_ratio(y_train), random_state=42),
     }
 
     if run_cv:
@@ -309,7 +342,10 @@ def run_training(
         X_all = pd.concat([X_train, X_test])
         y_all = pd.concat([y_train, y_test])
         for name, estimator in cv_estimators.items():
-            cross_validate_model(estimator, X_all, y_all, model_name=name)
+            if name == 'neural_network':
+                cross_validate_model(estimator, X_all.values, y_all.values, model_name=name)
+            else:
+                cross_validate_model(estimator, X_all, y_all, model_name=name)
 
     print("\n--- Final Model Training (original training data) ---")
     models = {
@@ -317,6 +353,7 @@ def run_training(
         'random_forest': train_random_forest(X_train, y_train),
         'xgboost': train_xgboost(X_train, y_train),
         'lightgbm': train_lightgbm(X_train, y_train),
+        'neural_network': train_mlp(X_train, y_train),
     }
 
     for name, model in models.items():
