@@ -1,8 +1,9 @@
 """
 Model training module for hospital readmission prediction.
 
-Trains three classifiers — Logistic Regression, Random Forest, and XGBoost —
-on the preprocessed diabetes dataset and saves each model to disk.
+Trains four classifiers — Logistic Regression, Random Forest, XGBoost,
+and LightGBM — on SMOTE-resampled training data and saves each model to disk.
+XGBoost is tuned via RandomizedSearchCV to maximise AUC-ROC.
 
 Author: Ronald Wen
 """
@@ -14,9 +15,11 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
+from imblearn.over_sampling import SMOTE
+from lightgbm import LGBMClassifier
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import StratifiedKFold, cross_validate
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, cross_validate
 from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBClassifier
 
@@ -39,11 +42,37 @@ def load_splits(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, 
     return X_train, X_test, y_train, y_test
 
 
-def _class_weight_ratio(y: pd.Series) -> float:
-    """Compute negative/positive ratio for XGBoost scale_pos_weight.
+def apply_smote(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    random_state: int = 42,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Apply SMOTE to oversample the minority class in the training set.
 
-    The dataset is heavily imbalanced (~11% positive rate), so upweighting
-    the minority class is critical for recall on readmitted patients.
+    SMOTE (Synthetic Minority Oversampling Technique) generates synthetic
+    positive examples by interpolating between existing minority samples,
+    producing a balanced training set without simply duplicating records.
+
+    Args:
+        X_train: Training feature matrix.
+        y_train: Training target series.
+        random_state: Seed for reproducibility.
+
+    Returns:
+        Resampled (X_train_smote, y_train_smote) with balanced class distribution.
+
+    Author: Ronald Wen
+    """
+    smote = SMOTE(random_state=random_state, n_jobs=-1)
+    X_res, y_res = smote.fit_resample(X_train, y_train)
+    X_res = pd.DataFrame(X_res, columns=X_train.columns)
+    y_res = pd.Series(y_res, name=y_train.name)
+    print(f"After SMOTE — train size: {len(X_res):,}  (class balance: {y_res.mean():.2f})")
+    return X_res, y_res
+
+
+def _class_weight_ratio(y: pd.Series) -> float:
+    """Compute negative/positive ratio for XGBoost/LightGBM scale_pos_weight.
 
     Author: Ronald Wen
     """
@@ -58,9 +87,6 @@ def train_logistic_regression(
     random_state: int = 42,
 ) -> LogisticRegression:
     """Fit a logistic regression with L2 regularisation as a linear baseline.
-
-    The 'saga' solver scales to large datasets and supports balanced
-    class weighting out of the box.
 
     Author: Ronald Wen
     """
@@ -83,10 +109,7 @@ def train_random_forest(
     y_train: pd.Series,
     random_state: int = 42,
 ) -> RandomForestClassifier:
-    """Fit a Random Forest with moderate depth to reduce overfitting on clinical data.
-
-    Balanced class weighting and feature subsampling ensure diversity
-    across trees while preserving signal from rare positive cases.
+    """Fit a Random Forest with moderate depth to reduce overfitting.
 
     Author: Ronald Wen
     """
@@ -109,29 +132,89 @@ def train_xgboost(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     random_state: int = 42,
+    n_iter: int = 30,
 ) -> XGBClassifier:
-    """Fit an XGBoost gradient-boosted classifier with explicit imbalance handling.
+    """Tune and fit an XGBoost classifier via RandomizedSearchCV.
 
-    scale_pos_weight is set to the negative/positive ratio so the loss
-    function penalises missed positive predictions proportionally.
+    Searches 30 random hyperparameter combinations using 3-fold stratified CV
+    optimising AUC-ROC, then retrains the best configuration on the full
+    training set.
+
+    Args:
+        X_train: Training feature matrix.
+        y_train: Training target series.
+        random_state: Seed for reproducibility.
+        n_iter: Number of random hyperparameter combinations to try.
 
     Author: Ronald Wen
     """
     spw = _class_weight_ratio(y_train)
 
-    model = XGBClassifier(
-        n_estimators=400,
-        learning_rate=0.05,
-        max_depth=6,
-        subsample=0.8,
-        colsample_bytree=0.8,
+    param_dist = {
+        'n_estimators': [200, 300, 400, 500],
+        'learning_rate': [0.01, 0.05, 0.1, 0.2],
+        'max_depth': [4, 5, 6, 7, 8],
+        'subsample': [0.6, 0.7, 0.8, 0.9],
+        'colsample_bytree': [0.6, 0.7, 0.8, 0.9],
+        'min_child_weight': [1, 3, 5, 10],
+        'gamma': [0, 0.1, 0.2, 0.5],
+    }
+
+    base = XGBClassifier(
         scale_pos_weight=spw,
         eval_metric='logloss',
         random_state=random_state,
         n_jobs=-1,
     )
-    print(f"Training XGBoost (scale_pos_weight={spw:.2f})...")
-    model.fit(X_train, y_train, verbose=False)
+
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=random_state)
+    search = RandomizedSearchCV(
+        base,
+        param_distributions=param_dist,
+        n_iter=n_iter,
+        scoring='roc_auc',
+        cv=cv,
+        random_state=random_state,
+        n_jobs=-1,
+        verbose=0,
+    )
+
+    print(f"Tuning XGBoost via RandomizedSearchCV ({n_iter} iterations)...")
+    search.fit(X_train, y_train)
+    print(f"  Best AUC-ROC (CV): {search.best_score_:.4f}")
+    print(f"  Best params: {search.best_params_}")
+    return search.best_estimator_
+
+
+def train_lightgbm(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    random_state: int = 42,
+) -> LGBMClassifier:
+    """Fit a LightGBM gradient-boosted classifier.
+
+    LightGBM uses histogram-based learning and leaf-wise tree growth,
+    making it faster and often more accurate than XGBoost on tabular data.
+    scale_pos_weight handles the class imbalance in the loss function.
+
+    Author: Ronald Wen
+    """
+    spw = _class_weight_ratio(y_train)
+
+    model = LGBMClassifier(
+        n_estimators=500,
+        learning_rate=0.05,
+        max_depth=7,
+        num_leaves=63,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=spw,
+        random_state=random_state,
+        n_jobs=-1,
+        verbose=-1,
+    )
+    print("Training LightGBM (500 estimators)...")
+    model.fit(X_train, y_train)
     print("  Done.")
     return model
 
@@ -145,21 +228,6 @@ def cross_validate_model(
     random_state: int = 42,
 ) -> dict[str, float]:
     """Run stratified k-fold cross-validation and report mean ± std metrics.
-
-    Stratified splits preserve the class imbalance ratio in each fold,
-    giving a more reliable estimate of generalisation performance than
-    a single train/test split.
-
-    Args:
-        model: Unfitted estimator to evaluate.
-        X: Full feature matrix (train + test combined for CV).
-        y: Full target series.
-        model_name: Display name for logging.
-        n_splits: Number of CV folds (default 5).
-        random_state: Seed for fold reproducibility.
-
-    Returns:
-        Dict with mean and std for AUC-ROC and F1.
 
     Author: Ronald Wen
     """
@@ -204,12 +272,19 @@ def run_training(
     models_dir: Path | None = None,
     run_cv: bool = True,
 ) -> dict[str, object]:
-    """Train all three models, run cross-validation, and persist to disk.
+    """Train all four models on SMOTE-resampled data and persist to disk.
+
+    Pipeline:
+      1. Load train/test splits
+      2. Apply SMOTE to balance the training set
+      3. Run 5-fold CV on original (non-SMOTE) training data for unbiased estimates
+      4. Train final models on SMOTE data
+      5. Persist all models
 
     Args:
         data_dir: Directory containing processed train/test CSVs.
         models_dir: Directory to write serialised model files.
-        run_cv: Whether to run 5-fold CV before final training (default True).
+        run_cv: Whether to run 5-fold CV (default True).
 
     Author: Ronald Wen
     """
@@ -219,27 +294,30 @@ def run_training(
 
     X_train, X_test, y_train, y_test = load_splits(data_dir)
 
-    model_builders = {
-        'logistic_regression': lambda: train_logistic_regression(X_train, y_train),
-        'random_forest': lambda: train_random_forest(X_train, y_train),
-        'xgboost': lambda: train_xgboost(X_train, y_train),
-    }
+    # Apply SMOTE to create balanced training data for final models
+    X_train_smote, y_train_smote = apply_smote(X_train, y_train)
 
     cv_estimators = {
         'logistic_regression': LogisticRegression(C=0.1, solver='saga', max_iter=1000, class_weight='balanced', random_state=42, n_jobs=-1),
         'random_forest': RandomForestClassifier(n_estimators=300, max_depth=12, min_samples_leaf=20, max_features='sqrt', class_weight='balanced', random_state=42, n_jobs=-1),
         'xgboost': XGBClassifier(n_estimators=400, learning_rate=0.05, max_depth=6, subsample=0.8, colsample_bytree=0.8, scale_pos_weight=_class_weight_ratio(y_train), eval_metric='logloss', random_state=42, n_jobs=-1),
+        'lightgbm': LGBMClassifier(n_estimators=500, learning_rate=0.05, max_depth=7, num_leaves=63, subsample=0.8, colsample_bytree=0.8, scale_pos_weight=_class_weight_ratio(y_train), random_state=42, n_jobs=-1, verbose=-1),
     }
 
     if run_cv:
-        print("\n--- 5-Fold Cross-Validation ---")
+        print("\n--- 5-Fold Cross-Validation (original training data) ---")
         X_all = pd.concat([X_train, X_test])
         y_all = pd.concat([y_train, y_test])
         for name, estimator in cv_estimators.items():
             cross_validate_model(estimator, X_all, y_all, model_name=name)
 
-    print("\n--- Final Model Training ---")
-    models = {name: builder() for name, builder in model_builders.items()}
+    print("\n--- Final Model Training (SMOTE-resampled data) ---")
+    models = {
+        'logistic_regression': train_logistic_regression(X_train_smote, y_train_smote),
+        'random_forest': train_random_forest(X_train_smote, y_train_smote),
+        'xgboost': train_xgboost(X_train_smote, y_train_smote),
+        'lightgbm': train_lightgbm(X_train_smote, y_train_smote),
+    }
 
     for name, model in models.items():
         save_model(model, name, models_dir)
