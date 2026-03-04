@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import StratifiedKFold, cross_validate
 from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBClassifier
 
@@ -135,6 +136,57 @@ def train_xgboost(
     return model
 
 
+def cross_validate_model(
+    model: object,
+    X: pd.DataFrame,
+    y: pd.Series,
+    model_name: str,
+    n_splits: int = 5,
+    random_state: int = 42,
+) -> dict[str, float]:
+    """Run stratified k-fold cross-validation and report mean ± std metrics.
+
+    Stratified splits preserve the class imbalance ratio in each fold,
+    giving a more reliable estimate of generalisation performance than
+    a single train/test split.
+
+    Args:
+        model: Unfitted estimator to evaluate.
+        X: Full feature matrix (train + test combined for CV).
+        y: Full target series.
+        model_name: Display name for logging.
+        n_splits: Number of CV folds (default 5).
+        random_state: Seed for fold reproducibility.
+
+    Returns:
+        Dict with mean and std for AUC-ROC and F1.
+
+    Author: Ronald Wen
+    """
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    scoring = {'roc_auc': 'roc_auc', 'f1': 'f1'}
+
+    print(f"Running {n_splits}-fold CV for {model_name}...")
+    results = cross_validate(model, X, y, cv=cv, scoring=scoring, n_jobs=-1)
+
+    mean_auc = float(np.mean(results['test_roc_auc']))
+    std_auc = float(np.std(results['test_roc_auc']))
+    mean_f1 = float(np.mean(results['test_f1']))
+    std_f1 = float(np.std(results['test_f1']))
+
+    print(
+        f"  {model_name}: AUC={mean_auc:.3f} ± {std_auc:.3f}  "
+        f"F1={mean_f1:.3f} ± {std_f1:.3f}"
+    )
+
+    return {
+        'cv_auc_mean': round(mean_auc, 4),
+        'cv_auc_std': round(std_auc, 4),
+        'cv_f1_mean': round(mean_f1, 4),
+        'cv_f1_std': round(std_f1, 4),
+    }
+
+
 def save_model(model: object, name: str, models_dir: Path) -> Path:
     """Serialize a fitted estimator to disk using joblib.
 
@@ -150,8 +202,14 @@ def save_model(model: object, name: str, models_dir: Path) -> Path:
 def run_training(
     data_dir: Path | None = None,
     models_dir: Path | None = None,
+    run_cv: bool = True,
 ) -> dict[str, object]:
-    """Train all three models and persist them to the models/ directory.
+    """Train all three models, run cross-validation, and persist to disk.
+
+    Args:
+        data_dir: Directory containing processed train/test CSVs.
+        models_dir: Directory to write serialised model files.
+        run_cv: Whether to run 5-fold CV before final training (default True).
 
     Author: Ronald Wen
     """
@@ -161,11 +219,27 @@ def run_training(
 
     X_train, X_test, y_train, y_test = load_splits(data_dir)
 
-    models = {
-        'logistic_regression': train_logistic_regression(X_train, y_train),
-        'random_forest': train_random_forest(X_train, y_train),
-        'xgboost': train_xgboost(X_train, y_train),
+    model_builders = {
+        'logistic_regression': lambda: train_logistic_regression(X_train, y_train),
+        'random_forest': lambda: train_random_forest(X_train, y_train),
+        'xgboost': lambda: train_xgboost(X_train, y_train),
     }
+
+    cv_estimators = {
+        'logistic_regression': LogisticRegression(C=0.1, solver='saga', max_iter=1000, class_weight='balanced', random_state=42, n_jobs=-1),
+        'random_forest': RandomForestClassifier(n_estimators=300, max_depth=12, min_samples_leaf=20, max_features='sqrt', class_weight='balanced', random_state=42, n_jobs=-1),
+        'xgboost': XGBClassifier(n_estimators=400, learning_rate=0.05, max_depth=6, subsample=0.8, colsample_bytree=0.8, scale_pos_weight=_class_weight_ratio(y_train), eval_metric='logloss', random_state=42, n_jobs=-1),
+    }
+
+    if run_cv:
+        print("\n--- 5-Fold Cross-Validation ---")
+        X_all = pd.concat([X_train, X_test])
+        y_all = pd.concat([y_train, y_test])
+        for name, estimator in cv_estimators.items():
+            cross_validate_model(estimator, X_all, y_all, model_name=name)
+
+    print("\n--- Final Model Training ---")
+    models = {name: builder() for name, builder in model_builders.items()}
 
     for name, model in models.items():
         save_model(model, name, models_dir)
