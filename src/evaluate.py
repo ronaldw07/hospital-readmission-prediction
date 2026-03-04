@@ -24,6 +24,7 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -73,15 +74,43 @@ def load_models(models_dir: Path) -> dict[str, object]:
 # Metric computation
 # ---------------------------------------------------------------------------
 
+def find_optimal_threshold(y_test: pd.Series, y_prob: np.ndarray) -> float:
+    """Find the classification threshold that maximises F1 score.
+
+    Sweeps the precision-recall curve to identify the operating point
+    with the best harmonic mean of precision and recall.
+
+    Args:
+        y_test: True binary labels.
+        y_prob: Predicted positive-class probabilities.
+
+    Returns:
+        Optimal threshold value.
+
+    Author: Ronald Wen
+    """
+    precisions, recalls, thresholds = precision_recall_curve(y_test, y_prob)
+    f1_scores = np.where(
+        (precisions + recalls) == 0,
+        0,
+        2 * (precisions * recalls) / (precisions + recalls),
+    )
+    best_idx = np.argmax(f1_scores[:-1])
+    best_threshold = float(thresholds[best_idx])
+    print(f"  Optimal threshold: {best_threshold:.3f}  (F1={f1_scores[best_idx]:.3f})")
+    return best_threshold
+
+
 def evaluate_model(
     model: object,
     X_test: pd.DataFrame,
     y_test: pd.Series,
 ) -> dict[str, float]:
-    """Compute a standard set of binary classification metrics.
+    """Compute classification metrics at both default and optimal thresholds.
 
-    Probabilities are used for AUC; the default 0.5 threshold is used
-    for all threshold-dependent metrics.
+    The default 0.5 threshold is reported alongside an optimised threshold
+    derived from the precision-recall curve, which better reflects
+    real-world performance on imbalanced clinical data.
 
     Args:
         model: Fitted estimator with predict / predict_proba methods.
@@ -96,12 +125,19 @@ def evaluate_model(
     y_pred = model.predict(X_test)
     y_prob = model.predict_proba(X_test)[:, 1]
 
+    optimal_threshold = find_optimal_threshold(y_test, y_prob)
+    y_pred_tuned = (y_prob >= optimal_threshold).astype(int)
+
     metrics = {
         'auc_roc': round(float(roc_auc_score(y_test, y_prob)), 4),
         'accuracy': round(float(accuracy_score(y_test, y_pred)), 4),
         'precision': round(float(precision_score(y_test, y_pred, zero_division=0)), 4),
         'recall': round(float(recall_score(y_test, y_pred, zero_division=0)), 4),
         'f1': round(float(f1_score(y_test, y_pred, zero_division=0)), 4),
+        'optimal_threshold': round(optimal_threshold, 4),
+        'tuned_precision': round(float(precision_score(y_test, y_pred_tuned, zero_division=0)), 4),
+        'tuned_recall': round(float(recall_score(y_test, y_pred_tuned, zero_division=0)), 4),
+        'tuned_f1': round(float(f1_score(y_test, y_pred_tuned, zero_division=0)), 4),
     }
     return metrics
 
@@ -140,6 +176,42 @@ def plot_roc_curves(
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
     print(f"ROC curves saved to {output_path}")
+
+
+def plot_precision_recall_curves(
+    models: dict[str, object],
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    output_path: Path,
+) -> None:
+    """Plot precision-recall curves for all models on a single axes.
+
+    PR curves are more informative than ROC curves for imbalanced datasets
+    because they focus on the minority (positive) class performance.
+
+    Author: Ronald Wen
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    colours = ['#2196F3', '#4CAF50', '#FF5722']
+    for (name, model), colour in zip(models.items(), colours):
+        y_prob = model.predict_proba(X_test)[:, 1]
+        precisions, recalls, _ = precision_recall_curve(y_test, y_prob)
+        pr_auc = auc(recalls, precisions)
+        ax.plot(recalls, precisions, label=f'{name} (AUC = {pr_auc:.3f})', color=colour, lw=2)
+
+    baseline = y_test.mean()
+    ax.axhline(baseline, color='gray', linestyle='--', lw=1, label=f'Random classifier ({baseline:.2f})')
+    ax.set_xlabel('Recall', fontsize=12)
+    ax.set_ylabel('Precision', fontsize=12)
+    ax.set_title('Precision-Recall Curve Comparison — 30-Day Readmission', fontsize=13)
+    ax.legend(loc='upper right', fontsize=10)
+    ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Precision-recall curves saved to {output_path}")
 
 
 def plot_confusion_matrix(
@@ -195,9 +267,9 @@ def run_evaluation(
         all_metrics[name] = metrics
         print(
             f"{name:25s}  AUC={metrics['auc_roc']:.3f}  "
-            f"F1={metrics['f1']:.3f}  "
-            f"Precision={metrics['precision']:.3f}  "
-            f"Recall={metrics['recall']:.3f}"
+            f"F1={metrics['f1']:.3f} → tuned F1={metrics['tuned_f1']:.3f}  "
+            f"Recall={metrics['recall']:.3f} → tuned Recall={metrics['tuned_recall']:.3f}  "
+            f"Threshold={metrics['optimal_threshold']:.3f}"
         )
 
     # Save metrics JSON
@@ -208,6 +280,9 @@ def run_evaluation(
 
     # ROC curves
     plot_roc_curves(models, X_test, y_test, results_dir / 'roc_curves.png')
+
+    # Precision-recall curves
+    plot_precision_recall_curves(models, X_test, y_test, results_dir / 'precision_recall_curves.png')
 
     # Confusion matrices per model
     for name, model in models.items():
