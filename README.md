@@ -58,6 +58,7 @@ hospital-readmission-prediction/
 │   ├── utils.py             # Helper functions
 │   ├── data_preprocessing.py
 │   ├── train_models.py
+│   ├── mlp_model.py         # PyTorch MLP with sklearn-compatible interface
 │   ├── evaluate.py
 │   └── explainability.py
 ├── .gitignore
@@ -92,14 +93,15 @@ jupyter notebook notebooks/readmission_analysis.ipynb
 
 ### Test Set Performance
 
-| Model               | AUC-ROC | Recall | F1 (default) | F1 (tuned threshold) |
-|---------------------|---------|--------|--------------|----------------------|
-| Logistic Regression | 0.626   | 0.519  | 0.205        | 0.215                |
-| Random Forest       | 0.640   | 0.453  | 0.219        | 0.221                |
-| XGBoost (tuned)     | 0.650   | 0.539  | 0.223        | 0.241                |
-| LightGBM            | 0.626   | 0.389  | 0.211        | 0.215                |
+| Model                  | AUC-ROC | Recall | F1 (default) | F1 (tuned threshold) |
+|------------------------|---------|--------|--------------|----------------------|
+| Logistic Regression    | 0.626   | 0.519  | 0.205        | 0.215                |
+| Random Forest          | 0.640   | 0.453  | 0.219        | 0.221                |
+| XGBoost (tuned)        | 0.650   | 0.539  | 0.223        | 0.241                |
+| LightGBM               | 0.626   | 0.389  | 0.211        | 0.215                |
+| Neural Network (MLP)   | 0.617   | 0.548  | 0.203        | 0.206                |
 
-XGBoost was tuned via RandomizedSearchCV (30 iterations, 3-fold CV) and achieved the best AUC-ROC of 0.650. Threshold tuning via precision-recall curve analysis further improved F1 to 0.241. Training data was resampled using SMOTE to address the 9% positive class rate.
+XGBoost was tuned via RandomizedSearchCV (30 iterations, 3-fold CV) and achieved the best AUC-ROC of 0.650. Threshold tuning via precision-recall curve analysis further improved F1 to 0.241. Training data was resampled using SMOTE to address the 9% positive class rate. The PyTorch MLP (two hidden layers: 128→64, BCEWithLogitsLoss with pos_weight) achieved the highest default recall at 0.548, demonstrating the trade-off between recall and precision on this imbalanced clinical dataset.
 
 ### 5-Fold Cross-Validation (Stratified)
 
@@ -125,9 +127,9 @@ From SHAP analysis, the strongest predictors of 30-day readmission are:
 ## Future Improvements
 
 - Incorporate temporal features (visit sequences per patient)
-- Experiment with neural network approaches
 - Build a Streamlit dashboard for clinical decision support
 - Calibrate model probabilities using Platt scaling
+- Extend MLP with batch normalisation and learning rate scheduling
 
 ## Author
 
